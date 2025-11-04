@@ -122,6 +122,7 @@ def print_segmat(segmat):
     for i in range(m):
         print(segmat[i])
 
+# In a block of segments, no more than 4 columns are valid
 def count_invalid_venom_block(segmat, V):
     inv_venom_blk = 0
     for seg in range(n//M):
@@ -135,6 +136,7 @@ def count_invalid_venom_block(segmat, V):
                 inv_venom_blk += 1
     return inv_venom_blk
 
+# Every segment can only have no more than 2 elements, and in a block of segments, no more than 4 columns are valid
 def count_invalid_venom_block_strict(segmat, V):
     inv_venom_blk = 0
     for seg in range(n//M):
@@ -196,7 +198,7 @@ if args.evalonly:
     with open("output.txt", "w") as file:
             file.write(str(init_inv_cnt)+","+str(init_inv_cnt_strict)) 
     sys.exit(0)
-
+# print_segmat(segmat)
 
 inv_cnt = init_inv_cnt
 prev_inv_cnt = init_inv_cnt
@@ -205,14 +207,14 @@ prev_inv_cnt_strict = init_inv_cnt_strict
 prev_row_indices = row_indices
 prev_col_indices = col_indices
 
-round = 1
+round = 0
+
 if init_inv_cnt > MAXITER: 
     MAXITER = init_inv_cnt
-
-while inv_cnt > 0 and round <= MAXITER:
-
+while inv_cnt > 0 and round < MAXITER:
     # hash segmat to bit hash table
     hashed_segmat = hash_segmat(segmat, bithashtab)
+
     # print_segmat(hashed_segmat)
 
     # sorted row by hashed bitstr
@@ -230,6 +232,7 @@ while inv_cnt > 0 and round <= MAXITER:
 
     # for result after reordering
     segmat = generate_segmat(new_row_indices, new_col_indices)
+    # print("round: ", round)
     # print_segmat(segmat)
     inv_cnt = count_invalid_venom_block(segmat, V)
     # print("invalid_venom_blocks: ", inv_cnt, "newid: ", new_id)
@@ -237,22 +240,21 @@ while inv_cnt > 0 and round <= MAXITER:
     inv_cnt_strict = count_invalid_venom_block_strict(segmat, V)
     # print("invalid_v_blocks: ", inv_cnt, ", invalid_vnm_blocks: ", inv_cnt_strict)
     # inv_nm_pattern = count_invalid_nm_pattern(segmat, V)
-
     # strict improve
     if inv_cnt > prev_inv_cnt:
         write_to_mtx(prev_row_indices, prev_col_indices)
+        # print(str(inv_cnt) + ","+str(init_inv_cnt)+","+str(init_inv_cnt_strict)+","+str(prev_inv_cnt)+","+str(prev_inv_cnt_strict)+","+str(round))
         with open("output.txt", "w") as file:
             file.write(str(init_inv_cnt)+","+str(init_inv_cnt_strict)+","+str(prev_inv_cnt)+","+str(prev_inv_cnt_strict)+","+str(round)) #+","+str(inv_nm_pattern)+","+str(prev_inv_nm_pattern))
         sys.exit(0)
 
-
+    round += 1
     # for next round
     prev_inv_cnt = inv_cnt
     prev_inv_cnt_strict = inv_cnt_strict
     # prev_inv_nm_pattern = inv_nm_pattern
     prev_row_indices = new_row_indices
     prev_col_indices = new_col_indices
-    round += 1
 
 final_cnt = prev_inv_cnt
 final_cnt_strict = prev_inv_cnt_strict
@@ -262,4 +264,4 @@ final_cnt_strict = prev_inv_cnt_strict
 
 write_to_mtx(prev_row_indices, prev_col_indices)
 with open("output.txt", "w") as file:
-    file.write(str(init_inv_cnt)+","+str(init_inv_cnt_strict)+","+str(final_cnt)+","+str(final_cnt_strict)+","+str(round-1)) #+","+str(init_inv_nm_pattern)+ "," +str(final_nm_pattern))
+    file.write(str(init_inv_cnt)+","+str(init_inv_cnt_strict)+","+str(final_cnt)+","+str(final_cnt_strict)+","+str(round)) #+","+str(init_inv_nm_pattern)+ "," +str(final_nm_pattern))

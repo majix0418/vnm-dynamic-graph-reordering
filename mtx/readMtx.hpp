@@ -88,7 +88,7 @@ void readTuples(std::vector<int>* row_indices,
                 int               nvals,
                 FILE*                          f) {
   int row_ind, col_ind;
-  T value;
+  // T value;
   mtxT raw_value;
   char type_str[3];
   type_str[0] = '%';
@@ -96,6 +96,7 @@ void readTuples(std::vector<int>* row_indices,
     type_str[1] = 'd';
   else if (typeid(mtxT) == typeid(float))
     type_str[1] = 'f';
+  T value = (T) 1.0;
 //  else if (typeid(mtxT) == typeid(double))
 //    type_str[1] = 'f';
 
@@ -113,7 +114,7 @@ void readTuples(std::vector<int>* row_indices,
       col_indices->push_back(col_ind-1);
 
       u = fscanf(f, type_str, &raw_value);
-      value = static_cast<T>(raw_value);
+      // value = static_cast<T>(raw_value);
 
       values->push_back(value);
     }

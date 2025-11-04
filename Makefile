@@ -18,12 +18,12 @@ LIBS         := -lcublas -lcudart -lcusparse -ldl ${NVCUSPARSE_SHARED} ${NVRTC_S
 
 CC = nvcc
 FLAGS = -arch=sm_89 -O3 -std=c++17 -w -L/usr/local/cuda/targets/x86_64-linux/lib/
+all: spmm spmm_dbg
+spmm: main_cyclic.cu 
+	$(CC) $(FLAGS) ${INCS} ${LIBS} main_cyclic.cu -o spmm
 
-spmm: main.cu 
-	$(CC) $(FLAGS) ${INCS} ${LIBS} main.cu -o spmm
-
-spmmeval: main_eval.cu 
-	$(CC) $(FLAGS) ${INCS} ${LIBS} main_eval.cu -o spmmeval
+spmm_dbg: main_v2.cu
+	$(CC) $(FLAGS) -g -G ${INCS} ${LIBS} main_v2.cu -o spmm_v2_dbg
 
 clean:
-	rm -f spmm spmmeval
+	rm -f spmm spmm_dbg

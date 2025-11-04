@@ -5,6 +5,7 @@
 
 #include <queue>
 #include <unordered_map>
+#include <unordered_set>
 #include <map>
 #include "swappair.h"
 
@@ -141,13 +142,15 @@ __global__ void GetSegSwapScoreAll(int *score,
 
     if (idx < nrows)
     {
-        // retrieve bitmap
+        // retrieve bitmap, binary search for the index of seg1's block's column id (seg1) which is in row (bsrrowptr[idx/M])
         int id1 = binarySearchInd<int>(bsrcolind, seg1, bsrrowptr[idx/M], bsrrowptr[idx/M+1]);
         
         register unsigned lval = 0x00000000;
         if (id1 != -1)
         {
-            for (int i=0; i<M; i++) 
+            for (int i=0; i<M; i++)
+            // laneid%M is the lane id in the block, the same as threadIdx.x % M 
+            // So this is the bitmap of the seg1 of row idx
                 lval = (lval << 1) + (bsrval[id1*M*M+(laneid%M)*M+i] != 0.0f);
         }
 
@@ -163,14 +166,14 @@ __global__ void GetSegSwapScoreAll(int *score,
         register int lgain[52] = {0};
         register int rgain[52] = {0};
 
-        // 0-15 for one swap
+        // 0-15 for one swap, M = 4 here
         for (int bitpos1=0; bitpos1<M; bitpos1++)
         {
             for (int bitpos2=0; bitpos2<M; bitpos2++)
             {
                 unsigned bit1 = (lval >> (M-1-bitpos1)) & 0x1;
                 unsigned bit2 = (rval >> (M-1-bitpos2)) & 0x1; 
-
+                // Swtich the two bits
                 register unsigned lval_new = (lval & ~(1 << (M-1-bitpos1))) | (bit2 << (M-1-bitpos1));
                 register unsigned rval_new = (rval & ~(1 << (M-1-bitpos2))) | (bit1 << (M-1-bitpos2));
                 // if (idx == 3 && bitpos1==0 && bitpos2==0) printBits(rval_new);
@@ -183,7 +186,7 @@ __global__ void GetSegSwapScoreAll(int *score,
         // 16-33 for two swaps
         register unsigned bit[8] = {0};
         register int pos[36][8] = {
-            {1, 2, 6, 7, 0, 3, 4, 5}, // {(0, 6), (3, 7)}
+            {1, 2, 6, 7, 0, 3, 4, 5}, // {(0, 6), (3, 7)} new l is 1 2 6 7 and new r is 0 3 4 5
             {1, 2, 5, 7, 0, 3, 4, 6}, // {(0, 5), (3, 7)}
             {1, 2, 5, 6, 0, 3, 4, 7}, // {(0, 5), (3, 6)}
             {1, 2, 4, 7, 0, 3, 5, 6}, // {(0, 4), (3, 7)}
@@ -242,6 +245,7 @@ __global__ void GetSegSwapScoreAll(int *score,
             // set bit
             for(int j=0; j<M; j++)
             {
+                // set bit at pos j
                 lval_new = setBit(lval_new, bit[pos[i][j]], j);
                 rval_new = setBit(rval_new, bit[pos[i][M+j]], j);
             }
@@ -359,7 +363,7 @@ public:
     std::vector<int> run_allpairs_reverse(bool verbose, bool stepmsg);
     std::vector<int> run_allpairs_reverse_double(bool verbose, bool stepmsg); 
     
-    std::vector<int> run_onepair(bool verbose, bool stepmsg);
+    std::vector<int> run_onepair(bool verbose, bool stepmsg, bool eval_only);
     std::vector<int> run_onepair_double(bool verbose, bool stepmsg);
     std::vector<int> run_onepair_reverse(bool verbose, bool stepmsg);
     std::vector<int> run_onepair_reverse_double(bool verbose, bool stepmsg); 
@@ -400,6 +404,16 @@ void reorderUtil<T>::reorder()
 
     // parallelize to gpu, O(nnz) -> O(1)
     int *newid_gpu;
+
+    // std::unordered_set<int> newid_set;
+    // for (int i = 0; i < this->newid.size(); ++i) {
+    //     if (this->newid[i] != -1) {
+    //         if (newid_set.count(this->newid[i])) {
+    //             std::cerr << "Duplicate value found in newid at index " << i << ": " << this->newid[i] << std::endl;
+    //         }
+    //         newid_set.insert(this->newid[i]);
+    //     }
+    // }
     SAFE_ALOC_GPU(newid_gpu, (this->mat)->nrows*sizeof(int));
     CUDA_SAFE_CALL( cudaMemcpy(newid_gpu, &this->newid[0], 
                     (this->mat)->nrows*sizeof(int), cudaMemcpyHostToDevice) );  
@@ -540,9 +554,10 @@ SwapPairsList reorderUtil<T>::get_segment_swap_score_all(const int seg1, const i
     int *result_gpu;
     SAFE_ALOC_GPU(result_gpu, 52*2*sizeof(int));
     CUDA_SAFE_CALL( cudaMemset(result_gpu, 0, 52*2*sizeof(int)) );
-
+    // One thread for one row
     dim3 GRID(((this->mat)->nrows+MAXTHRD-1)/MAXTHRD);
     dim3 BLOCK(MAXTHRD);
+    // The bsr is M by M block size
     GetSegSwapScoreAll<<<GRID, BLOCK>>>(result_gpu, 
                                         (this->mat)->device_ref.bsr_indptr, 
                                         (this->mat)->device_ref.bsr_indices,
@@ -807,7 +822,7 @@ std::vector<int> reorderUtil<T>::run_complete(bool verbose=false, bool stepmsg=f
     
     // reset max iter
     // option 1: pat delta
-    // if (init_cnt/48 > MAXITER) MAXITER = init_cnt/48;
+    // if (init_cnt/800 > MAXITER) MAXITER = init_cnt/800;
 
     // option 2: list delta
     if (init_size > MAXITER) MAXITER = init_size;
@@ -971,7 +986,7 @@ std::vector<int> reorderUtil<T>::run(bool verbose=false, bool stepmsg=false)
     
     // reset max iter
     // option 1: pat delta
-    // if (init_cnt/48 > MAXITER) MAXITER = init_cnt/48;
+    // if (init_cnt/800 > MAXITER) MAXITER = init_cnt/800;
 
     // option 2: list delta
     if (init_size > MAXITER) MAXITER = init_size;
@@ -1110,7 +1125,7 @@ std::vector<int> reorderUtil<T>::run_allpairs(bool verbose=false, bool stepmsg=f
     
     // reset max iter
     // option 1: pat delta
-    // if (init_cnt/48 > MAXITER) MAXITER = init_cnt/48;
+    // if (init_cnt/800 > MAXITER) MAXITER = init_cnt/800;
 
     // option 2: list delta
     if (init_size > MAXITER) MAXITER = init_size;
@@ -1192,9 +1207,9 @@ std::vector<int> reorderUtil<T>::run_allpairs(bool verbose=false, bool stepmsg=f
                 // if lseg's node is visited, pop top
                 if (verbose) std::cout << "===== Filter out the visited nodes in list: =====" << std::endl;
                 while (!score.empty() 
-                    && (visited((score.top())->v1) || visited((score.top())->v2))
-                    && (((score.top())->v3 != -1) && visited((score.top())->v3) || 
-                    ((score.top())->v4 != -1) && visited((score.top())->v4)) ) { 
+                    && ((visited((score.top())->v1) || visited((score.top())->v2))
+                    || (((score.top())->v3 != -1) && visited((score.top())->v3) || 
+                    ((score.top())->v4 != -1) && visited((score.top())->v4))) ) { 
                     if (verbose) { 
                         if (visited((score.top())->v1))
                             std::cout << (score.top())->v1 << " has been visited in this round!" << std::endl;
@@ -1282,7 +1297,7 @@ std::vector<int> reorderUtil<T>::run_allpairs_double(bool verbose=false, bool st
     
     // reset max iter
     // option 1: pat delta
-    // if (init_cnt/48 > MAXITER) MAXITER = init_cnt/48;
+    // if (init_cnt/800 > MAXITER) MAXITER = init_cnt/800;
 
     // option 2: list delta
     if (init_size > MAXITER) MAXITER = init_size;
@@ -1372,9 +1387,9 @@ std::vector<int> reorderUtil<T>::run_allpairs_double(bool verbose=false, bool st
                 // if lseg's node is visited, pop top
                 if (verbose) std::cout << "===== Filter out the visited nodes in list: =====" << std::endl;
                 while (!score.empty() 
-                    && (visited((score.top())->v1) || visited((score.top())->v2))
-                    && (((score.top())->v3 != -1) && visited((score.top())->v3) || 
-                    ((score.top())->v4 != -1) && visited((score.top())->v4)) ) { 
+                    && ((visited((score.top())->v1) || visited((score.top())->v2))
+                    || (((score.top())->v3 != -1) && visited((score.top())->v3) || 
+                    ((score.top())->v4 != -1) && visited((score.top())->v4)))  ) { 
                     if (verbose) { 
                         if (visited((score.top())->v1))
                             std::cout << (score.top())->v1 << " has been visited in this round!" << std::endl;
@@ -1462,7 +1477,7 @@ std::vector<int> reorderUtil<T>::run_allpairs_reverse(bool verbose=false, bool s
     
     // reset max iter
     // option 1: pat delta
-    // if (init_cnt/48 > MAXITER) MAXITER = init_cnt/48;
+    // if (init_cnt/800 > MAXITER) MAXITER = init_cnt/800;
 
     // option 2: list delta
     if (init_size > MAXITER) MAXITER = init_size;
@@ -1544,9 +1559,9 @@ std::vector<int> reorderUtil<T>::run_allpairs_reverse(bool verbose=false, bool s
                 // if lseg's node is visited, pop top
                 if (verbose) std::cout << "===== Filter out the visited nodes in list: =====" << std::endl;
                 while (!score.empty() 
-                    && (visited((score.top())->v1) || visited((score.top())->v2))
-                    && (((score.top())->v3 != -1) && visited((score.top())->v3) || 
-                    ((score.top())->v4 != -1) && visited((score.top())->v4)) ) { 
+                    && ((visited((score.top())->v1) || visited((score.top())->v2))
+                    || (((score.top())->v3 != -1) && visited((score.top())->v3) || 
+                    ((score.top())->v4 != -1) && visited((score.top())->v4))) ) { 
                     if (verbose) { 
                         if (visited((score.top())->v1))
                             std::cout << (score.top())->v1 << " has been visited in this round!" << std::endl;
@@ -1634,7 +1649,7 @@ std::vector<int> reorderUtil<T>::run_allpairs_reverse_double(bool verbose=false,
     
     // reset max iter
     // option 1: pat delta
-    // if (init_cnt/48 > MAXITER) MAXITER = init_cnt/48;
+    // if (init_cnt/800 > MAXITER) MAXITER = init_cnt/800;
 
     // option 2: list delta
     if (init_size > MAXITER) MAXITER = init_size;
@@ -1723,9 +1738,9 @@ std::vector<int> reorderUtil<T>::run_allpairs_reverse_double(bool verbose=false,
                 // if lseg's node is visited, pop top
                 if (verbose) std::cout << "===== Filter out the visited nodes in list: =====" << std::endl;
                 while (!score.empty() 
-                    && (visited((score.top())->v1) || visited((score.top())->v2))
-                    && (((score.top())->v3 != -1) && visited((score.top())->v3) || 
-                    ((score.top())->v4 != -1) && visited((score.top())->v4)) ) { 
+                    && ((visited((score.top())->v1) || visited((score.top())->v2))
+                    || (((score.top())->v3 != -1) && visited((score.top())->v3) || 
+                    ((score.top())->v4 != -1) && visited((score.top())->v4))) ) { 
                     if (verbose) { 
                         if (visited((score.top())->v1))
                             std::cout << (score.top())->v1 << " has been visited in this round!" << std::endl;
@@ -1803,20 +1818,22 @@ std::vector<int> reorderUtil<T>::run_allpairs_reverse_double(bool verbose=false,
 }
 
 template<typename T>
-std::vector<int> reorderUtil<T>::run_onepair(bool verbose=false, bool stepmsg=false) 
+std::vector<int> reorderUtil<T>::run_onepair(bool verbose=false, bool stepmsg=false, bool eval_only=false) 
 {
     InvalSegList inv_seg_list = this->locate_invalid_segment();
     int init_cnt = this->get_total_invalid_segment_cnt(inv_seg_list);
     int init_size = inv_seg_list.size();
     int primary_seg, primary_cnt, target_seg, target_cnt;
     int round = 1;
+    if (eval_only) 
+        return {init_size, init_size, init_cnt, init_cnt, 0};
     
     // reset max iter
     // option 1: pat delta
-    // if (init_cnt/48 > MAXITER) MAXITER = init_cnt/48;
+    if (init_cnt/800 > MAXITER) MAXITER = init_cnt/800;
 
     // option 2: list delta
-    if (init_size > MAXITER) MAXITER = init_size;
+    // if (init_size > MAXITER) MAXITER = init_size;
 
     while (round <= MAXITER && inv_seg_list.size() >= 1) {
 
@@ -1833,7 +1850,7 @@ std::vector<int> reorderUtil<T>::run_onepair(bool verbose=false, bool stepmsg=fa
             std::cout << "===== Invalid Segment List (round " + std::to_string(round) + ") =====" << std::endl;
             showpq(inv_seg_list);
         }
-
+        // If only one invalid segment, find a pair in that segment and the most sparse segment
         if (inv_seg_list.size() == 1)
         {
             int minseg = this->locate_min_outdeg_seg();
@@ -1859,6 +1876,7 @@ std::vector<int> reorderUtil<T>::run_onepair(bool verbose=false, bool stepmsg=fa
             }
         }
         
+        // If more than one invalid segment, find a pair in that segment and the second segment in the list
         while (inv_seg_list.size() >= 2)
         {
             // set primary seg & cnt
@@ -1967,6 +1985,7 @@ std::vector<int> reorderUtil<T>::run_onepair(bool verbose=false, bool stepmsg=fa
 }
 
 template<typename T>
+// Reverse the original order, use the segment with fewest invalid segment vectors as target for the primary segment
 std::vector<int> reorderUtil<T>::run_onepair_double(bool verbose=false, bool stepmsg=false) 
 {
     InvalSegList inv_seg_list = this->locate_invalid_segment();
@@ -1977,10 +1996,10 @@ std::vector<int> reorderUtil<T>::run_onepair_double(bool verbose=false, bool ste
     
     // reset max iter
     // option 1: pat delta
-    // if (init_cnt/48 > MAXITER) MAXITER = init_cnt/48;
+    if (init_cnt/800 > MAXITER) MAXITER = init_cnt/800;
 
     // option 2: list delta
-    if (init_size > MAXITER) MAXITER = init_size;
+    // if (init_size > MAXITER) MAXITER = init_size;
 
     while (round <= MAXITER && inv_seg_list.size() >= 1) {
 
@@ -2003,7 +2022,8 @@ std::vector<int> reorderUtil<T>::run_onepair_double(bool verbose=false, bool ste
             int minseg = this->locate_min_outdeg_seg();
 
             // retrive swap list // TODO: try aggressive all pair if still impossible
-            SwapPairList score = this->get_segment_swap_score(inv_seg_list.top().first, minseg);     
+            SwapPairList score = this->get_segment_swap_score(inv_seg_list.top().first, minseg);
+            
             // SwapPairsList score = this->get_segment_swap_score_all(inv_seg_list.top().first, minseg);    
             if (verbose) { 
                 std::cout << "===== Swap Pair List =====" << std::endl;
@@ -2049,7 +2069,7 @@ std::vector<int> reorderUtil<T>::run_onepair_double(bool verbose=false, bool ste
                 // as primary seg still has invalid segs & not all nodes are visited
                 if (primary_cnt <= 0 || seg_visited(primary_seg)) break;
 
-                // set target seg & cnt
+                // set target seg & cnt, reversed (with smallest number of invalid segs)
                 target_seg = (tempPQ.top()).first;
                 target_cnt = (tempPQ.top()).second;
                 if (verbose) { 
@@ -2139,6 +2159,7 @@ std::vector<int> reorderUtil<T>::run_onepair_double(bool verbose=false, bool ste
 }
 
 template<typename T>
+// Reverse means look at the smallest pscore first (as both primary and target)
 std::vector<int> reorderUtil<T>::run_onepair_reverse(bool verbose=false, bool stepmsg=false) 
 {
     InvalSegList inv_seg_list = this->locate_invalid_segment_reverse();
@@ -2149,10 +2170,10 @@ std::vector<int> reorderUtil<T>::run_onepair_reverse(bool verbose=false, bool st
     
     // reset max iter
     // option 1: pat delta
-    // if (init_cnt/48 > MAXITER) MAXITER = init_cnt/48;
+    if (init_cnt/800 > MAXITER) MAXITER = init_cnt/800;
 
     // option 2: list delta
-    if (init_size > MAXITER) MAXITER = init_size;
+    // if (init_size > MAXITER) MAXITER = init_size;
 
     while (round <= MAXITER && inv_seg_list.size() >= 1) {
 
@@ -2313,10 +2334,10 @@ std::vector<int> reorderUtil<T>::run_onepair_reverse_double(bool verbose=false, 
     
     // reset max iter
     // option 1: pat delta
-    // if (init_cnt/48 > MAXITER) MAXITER = init_cnt/48;
+    if (init_cnt/800 > MAXITER) MAXITER = init_cnt/800;
 
     // option 2: list delta
-    if (init_size > MAXITER) MAXITER = init_size;
+    // if (init_size > MAXITER) MAXITER = init_size;
 
     while (round <= MAXITER && inv_seg_list.size() >= 1) {
         

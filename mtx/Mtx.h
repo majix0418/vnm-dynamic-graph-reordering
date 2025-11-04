@@ -20,9 +20,13 @@ class Mtx {
 public:
     Mtx(std::string &mtxfile, int aligned) { this->init_from_file(mtxfile, aligned); }
     Mtx(Mtx<T> &cpymat) { this->init_from_copy(cpymat); }
+    Mtx(int m, int n, int nnz, std::vector<int>& coo_row_ind, std::vector<int>& coo_col_ind, std::vector<T>& coo_vals) {
+        this->init_from_coo(m, n, nnz, coo_row_ind, coo_col_ind, coo_vals);
+    }
 
     void init_from_file(std::string &mtxfile, int aligned);
     void init_from_copy(Mtx<T> &cpymat);
+    void init_from_coo(int m, int n, int nnz, std::vector<int>& coo_row_ind, std::vector<int>& coo_col_ind, std::vector<T>& coo_vals);
     void print();
     void convert_to_bsr_and_sync_device();
     void get_bsr_host();
@@ -41,6 +45,19 @@ public:
         SAFE_FREE_GPU(device_ref.bsr_indptr);
         SAFE_FREE_GPU(device_ref.bsr_indices);
         SAFE_FREE_GPU(device_ref.bsr_values);
+    }
+    void __clear_host_ref() {
+        this->coo_rowind_h.clear();
+        this->coo_colind_h.clear();
+        this->coo_values_h.clear();
+
+        this->csr_indptr_h.clear();
+        this->csr_indices_h.clear();
+        this->csr_values_h.clear();
+
+        this->bsr_indptr_h.clear();
+        this->bsr_indices_h.clear();
+        this->bsr_values_h.clear();
     }
 
     ~Mtx() {
@@ -98,9 +115,23 @@ public:
 template<typename T>
 void Mtx<T>::init_from_file(std::string &mtxfile, int aligned)
 {
+    __clear_host_ref();
+    __clear_device_ref();
     // load coo format host, general info
     readMtx(mtxfile.c_str(), &this->coo_rowind_h, &this->coo_colind_h, &this->coo_values_h,
     &this->nrows, &this->ncols, &this->nnz, 0, false);
+    std::vector<int> coo_ros_copy = this->coo_rowind_h;
+    std::vector<int> coo_cols_copy = this->coo_colind_h;
+    std::vector<T> coo_vals_copy = this->coo_values_h;
+    this->init_from_coo(this->nrows, this->ncols, this->nnz,
+            coo_ros_copy, coo_cols_copy, coo_vals_copy);
+    return;
+    // std::cout << "after reading, the row ids are " << std::endl;
+    // for (int i = 0; i < 40; ++i)
+    // {
+    //     std::cout << this->coo_rowind_h[i] << " ";
+    // }
+    // std::cout << std::endl;
 
     // alignment processing (for reorder algorithm)
     if (this->nrows % aligned != 0) {
@@ -110,6 +141,80 @@ void Mtx<T>::init_from_file(std::string &mtxfile, int aligned)
 
     // ensure nnz is correct
     if (this->nnz != coo_values_h.size()) this->nnz = coo_values_h.size();
+
+    // load csr format host
+    // int *csrindptr, *csrcolind;
+    // T *csrval;
+    // SAFE_ALOC_HOST(csrindptr, (this->nrows+1)*sizeof(int));
+    // SAFE_ALOC_HOST(csrcolind, this->nnz*sizeof(int));
+    // SAFE_ALOC_HOST(csrval, this->nnz*sizeof(T));
+    int *csrindptr = (int*)malloc((this->nrows+1) * sizeof(int));
+    int *csrcolind = (int*)malloc(this->nnz * sizeof(int));
+    T *csrval = (T*)malloc(this->nnz * sizeof(T));
+
+    coo2csr(csrindptr, csrcolind, csrval,
+            this->coo_rowind_h, this->coo_colind_h, this->coo_values_h, 
+            this->nrows, this->ncols);
+    
+    this->csr_indptr_h.resize(this->nrows+1);
+    this->csr_indices_h.resize(this->nnz);
+    this->csr_values_h.resize(this->nnz);
+    memcpy(&this->csr_indptr_h[0], csrindptr, (this->nrows+1)*sizeof(int));
+    memcpy(&this->csr_indices_h[0], csrcolind, this->nnz*sizeof(int));
+    memcpy(&this->csr_values_h[0], csrval, this->nnz*sizeof(T));
+    // SAFE_FREE_HOST(csrindptr);
+    // SAFE_FREE_HOST(csrcolind);
+    // SAFE_FREE_HOST(csrval);
+    free(csrindptr);
+    free(csrcolind);
+    free(csrval);
+
+    // set flag
+    initialized = true;
+    if (device_synced) {
+        // clear any old version
+        this->__clear_device_ref();
+        device_synced = false;
+        bsr_converted = false;
+    }
+
+    // convert to bsr and sync storage to device
+    this->convert_to_bsr_and_sync_device();
+}
+
+template<typename T>
+void Mtx<T>::init_from_coo(int m, int n, int nnz, std::vector<int>& coo_row_ind, std::vector<int>& coo_col_ind, std::vector<T>& coo_vals)
+{
+    __clear_host_ref();
+    __clear_device_ref();
+    // load coo format host, general info
+    // coo format on host
+    customSort<T>(&coo_row_ind, &coo_col_ind, &coo_vals);
+    this->coo_rowind_h.resize(coo_row_ind.size());
+    this->coo_colind_h.resize(coo_col_ind.size());
+    this->coo_values_h.resize(coo_vals.size());
+    memcpy(&this->coo_rowind_h[0], &coo_row_ind[0], 
+           coo_row_ind.size()*sizeof(int));
+    memcpy(&this->coo_colind_h[0], &coo_col_ind[0], 
+        coo_col_ind.size()*sizeof(int));
+    memcpy(&this->coo_values_h[0], &coo_vals[0], 
+        coo_vals.size()*sizeof(T));
+    this->nrows = m;
+    this->ncols = n;
+    this->nnz = nnz;
+
+    // alignment processing (for reorder algorithm)
+    int aligned = M;
+    if (this->nrows % aligned != 0) {
+        this->nrows = ((this->nrows + aligned - 1) / aligned) * aligned;
+        this->ncols = ((this->ncols + aligned - 1) / aligned) * aligned;
+    }
+    // std::cout << "zrf1" << this->nrows << " " << this->ncols << " " << this->nnz << " " << this->coo_rowind_h.size() << " " << this->coo_colind_h.size() << " " << this->coo_values_h.size() << std::endl;
+    // for (int i = 0;i < 20; i++) {
+    //     std::cout << this->coo_rowind_h[i] << " " << this->coo_colind_h[i] << " " << this->coo_values_h[i] << std::endl;
+    // }
+    // ensure nnz is correct
+    if (this->nnz != this->coo_values_h.size()) this->nnz = coo_values_h.size();
 
     // load csr format host
     // int *csrindptr, *csrcolind;
@@ -427,11 +532,54 @@ void Mtx<T>::write_to_file(std::string &destfile)
     /* NOTE: matrix market files use 1-based indices, i.e. first element
       of a vector has index 1, not 0.  */
     this->get_coo_host();
+    // std::cout << "Before writing, the row ids are " << std::endl;
+    // for (int i = 0; i < 40; ++i)
+    // {
+    //     std::cout << this->coo_rowind_h[i] << " ";
+    // }
+    // std::cout << std::endl;
     for (int i=0; i<this->nnz; i++)
         fprintf(fptr, "%d %d %.2f\n", this->coo_rowind_h[i]+1, this->coo_colind_h[i]+1, this->coo_values_h[i]);
         // fprintf(fptr, "%d %d %10.3g\n", this->coo_rowind_h[i]+1, this->coo_colind_h[i]+1, this->coo_values_h[i]);
     
     fclose(fptr);
+    // if (coo_ros_copy != this->coo_rowind_h) {
+    //     std::cout << "Difference detected between coo_ros_copy and this->coo_rowind_h!" << std::endl;
+    //     for (size_t i = 0; i < coo_ros_copy.size(); ++i) {
+    //         if (coo_ros_copy[i] != this->coo_rowind_h[i]) {
+    //             std::cout << "Index " << i << ": coo_ros_copy = " << coo_ros_copy[i]
+    //                       << ", this->coo_rowind_h = " << this->coo_rowind_h[i] << std::endl;
+    //         }
+    //     }
+    // } else {
+    //     std::cout << "No difference detected between coo_ros_copy and this->coo_rowind_h." << std::endl;
+    // }
+
+    // if (coo_cols_copy != this->coo_colind_h) {
+    //     std::cout << "Difference detected between coo_cols_copy and this->coo_colind_h!" << std::endl;
+    //     for (size_t i = 0; i < coo_cols_copy.size(); ++i) {
+    //         if (coo_cols_copy[i] != this->coo_colind_h[i]) {
+    //             std::cout << "Index " << i << ": coo_cols_copy = " << coo_cols_copy[i]
+    //                       << ", this->coo_colind_h = " << this->coo_colind_h[i] << std::endl;
+    //         }
+    //     }
+    // } else {
+    //     std::cout << "No difference detected between coo_cols_copy and this->coo_colind_h." << std::endl;
+    // }
+
+    // if (coo_vals_copy != this->coo_values_h) {
+    //     std::cout << "Difference detected between coo_vals_copy and this->coo_values_h!" << std::endl;
+    //     for (size_t i = 0; i < coo_vals_copy.size(); ++i) {
+    //         if (coo_vals_copy[i] != this->coo_values_h[i]) {
+    //             std::cout << "Index " << i << ": coo_vals_copy = " << coo_vals_copy[i]
+    //                       << ", this->coo_values_h = " << this->coo_values_h[i] << std::endl;
+    //         }
+    //     }
+    // } else {
+    //     std::cout << "No difference detected between coo_vals_copy and this->coo_values_h." << std::endl;
+    // }
+    // this->init_from_coo(this->nrows, this->ncols, this->nnz, coo_ros_copy, coo_cols_copy, coo_vals_copy);
+    // this->reset();
 }
 
 template<typename T>
@@ -439,6 +587,25 @@ void Mtx<T>::reset()
 {
     // get the latest coo
     this->get_coo_host();
+    this->csr_indptr_h.clear();
+    this->csr_indices_h.clear();
+    this->csr_values_h.clear();
+
+    this->bsr_indptr_h.clear();
+    this->bsr_indices_h.clear();
+    this->bsr_values_h.clear();
+    this->__clear_device_ref();
+    customSort<T>(&this->coo_rowind_h, &this->coo_colind_h, &this->coo_values_h);
+    initialized = false;
+    // alignment processing (for reorder algorithm)
+    if (this->nrows % M != 0) {
+        this->nrows = ((this->nrows + M - 1) / M) * M;
+        this->ncols = ((this->ncols + M - 1) / M) * M;
+    }
+
+    // ensure nnz is correct
+    if (this->nnz != coo_values_h.size()) this->nnz = coo_values_h.size();
+
 
     // redo the initialization for all
     // int *csrindptr, *csrcolind;
@@ -449,6 +616,7 @@ void Mtx<T>::reset()
     int *csrindptr = (int*)malloc((this->nrows+1) * sizeof(int));
     int *csrcolind = (int*)malloc(this->nnz * sizeof(int));
     T *csrval = (T*)malloc(this->nnz * sizeof(T));
+    
 
     coo2csr(csrindptr, csrcolind, csrval,
             this->coo_rowind_h, this->coo_colind_h, this->coo_values_h, 
